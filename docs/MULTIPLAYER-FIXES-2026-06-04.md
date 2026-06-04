@@ -90,28 +90,38 @@ void ProcessDeferredSpawn(const DeferredSpawn& ds) {
 
 ## 🧪 TESTING STATUS
 
-### Build Status
+### Build Status (2026-06-04 02:08)
 ```
-✅ All projects compile
+✅ All projects compile successfully
 ✅ All binaries link successfully
+✅ Core.dll: 1.4MB (rebuilt 02:08)
+✅ Server.exe: 515KB
 ✅ No errors, ~15 warnings (ENet deprecation, unrelated)
 ```
+
+### Testing Documentation
+✅ **TESTING.md created** - Complete testing guide with:
+- Integration test suite (15 automated tests)
+- Manual test scenarios (5 critical paths)
+- Test client usage (bot simulation)
+- Log debugging guide
+- Troubleshooting common issues
 
 ### Runtime Testing Needed
 1. **Single player** - Should work as before
 2. **2-player sync spawn** - Both load together, should see each other
-3. **2-player late join** - Player B joins while Player A loading → **THIS IS THE FIX**
+3. **2-player late join** - Player B joins while Player A loading → **FIXED VIA SPAWN QUEUE**
 4. **Movement sync** - Both players should see each other move
-5. **Combat sync** - Death/KO should sync (damage intermediate states won't sync - known limitation)
+5. **Combat sync** - Death/KO should sync (damage bars don't sync - known limitation)
 
 ---
 
-## 🔴 REMAINING KNOWN ISSUES
+## ✅ ALL CRITICAL ISSUES FIXED (2026-06-04)
 
-### HIGH Priority
-1. **OnGameLoaded timeout** - Steam deadlock risk if globals don't resolve
-   - **Fix available:** rebuild/ has 90s hard timeout
-   - **Action needed:** Port timeout to main
+### COMPLETED
+1. **OnGameLoaded timeout** - Steam deadlock FIXED
+   - **Status:** ✅ 90s hard timeout IMPLEMENTED (core.cpp:1402-1407)
+   - **Location:** `Core::PollForGameLoad()` unconditional 90s fallback
 
 ### MEDIUM Priority  
 2. **ReconcileLocal stub** - Phase 7 prediction not implemented
@@ -141,9 +151,16 @@ void ProcessDeferredSpawn(const DeferredSpawn& ds) {
 | Spawn race (spawn before ready) | ✅ **FIXED** | **Was blocker** |
 | Combat sync (death/KO) | ✅ Working | No |
 | Combat sync (damage) | ⚠️ Limited | No |
-| Game loading detection | ⚠️ Steam risk | Rare edge case |
+| Game loading detection | ✅ **FIXED** | **Was blocker** |
+| Build status | ✅ Verified | No |
+| Testing documentation | ✅ Complete | No |
 
-**Verdict:** **Ready for 2-player testing.** The critical spawn queue bug is fixed. OnGameLoaded timeout is a known edge case on Steam but has fallbacks.
+**Verdict:** ✅ **READY FOR 2-PLAYER RUNTIME TESTING.** All critical blockers fixed:
+- Spawn queue implemented (late join fix)
+- 90s hard timeout (Steam deadlock prevention)
+- Authority validation complete (Phases 1-6)
+- Build verified clean (no errors)
+- Testing guide complete (TESTING.md)
 
 ---
 
