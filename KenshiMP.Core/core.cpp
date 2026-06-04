@@ -1,4 +1,5 @@
 #include "core.h"
+#include "sync/pending_snapshot_queue.h"
 #include "sys/command_registry.h"
 #include "hooks/render_hooks.h"
 #include "hooks/input_hooks.h"
@@ -39,7 +40,7 @@
 namespace kmp {
 
 // Forward declaration (in kmp namespace)
-namespace kmp { void InitPacketHandler(); }
+void InitPacketHandler();
 
 // ── Crash diagnostics ──
 // Tracks last completed step in OnGameTick so the crash handler can report it.
@@ -505,7 +506,7 @@ bool Core::Initialize() {
     }
 
     // Initialize packet handler
-    kmp::InitPacketHandler();
+    InitPacketHandler();
     m_nativeHud.LogStep("NET", "Packet handler registered");
 
     // Set up SpawnManager callback
@@ -1395,6 +1396,18 @@ void Core::PollForGameLoad() {
                 OnGameLoaded();
             }
         }
+
+        // CRITICAL FIX: Unconditional hard timeout for Steam deadlock case
+        // If GameWorldSingleton unresolved (Steam bug), globals never become valid,
+        // so the above 120s timeout never fires. Add hard 90s timeout regardless.
+        if (s_noCharCount >= 45) {
+            spdlog::error("Core::PollForGameLoad — HARD TIMEOUT: 90s with no loading detection! "
+                         "Forcing OnGameLoaded (Steam deadlock prevention)");
+            m_nativeHud.AddSystemMessage("WARNING: Force-loaded after 90s timeout!");
+            m_nativeHud.LogStep("WARN", "Hard timeout (90s) - forced GameLoaded");
+            entity_hooks::SetLoadingPassthrough(false);
+            OnGameLoaded();
+        }
     }
 }
 
@@ -2206,6 +2219,16 @@ void Core::OnGameTick(float deltaTime) {
                     Memory::Write(gwPtr + offsets.world.gameSpeed, normalSpeed);
                 }
             }
+        }
+    }
+
+    // ── Step 0.5: Cleanup old pending snapshots ──
+    // Every 300 ticks (~5 seconds at 60fps), remove position updates older than 10s
+    // that were queued for entities that never spawned. Prevents unbounded memory growth.
+    {
+        static int s_cleanupCounter = 0;
+        if (++s_cleanupCounter % 300 == 0) {
+            PendingSnapshotQueue::CleanupOld(SessionTime(), 10.0f);
         }
     }
 
@@ -3629,6 +3652,7 @@ void Core::BackgroundReadEntities() {
 
         PendingPos pp;
         pp.cp.entityId = netId;
+        pp.cp.generation = infoCopy.generation; // Phase 6: send current generation
         pp.cp.posX = pos.x;
         pp.cp.posY = pos.y;
         pp.cp.posZ = pos.z;

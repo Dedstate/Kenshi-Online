@@ -10,22 +10,24 @@ SnapshotDecision AuthorityValidator::ValidateInboundSnapshot(
     EntityRegistry& registry
 ) {
     // 1. Check if entity exists in registry
-    auto* info = registry.Find(pos.entityId);
-    if (!info) {
+    auto infoOpt = registry.GetInfo(pos.entityId);
+    if (!infoOpt.has_value()) {
         // Entity not spawned yet → queue for interpolator to handle later
         return SnapshotDecision::QueuePendingSpawn;
     }
+    const auto& info = infoOpt.value();
 
-    // 2. Check generation match
-    // Note: For Phase 2, generation checking uses 0 (Phase 6 will add full tracking)
-    if (pos.generation != 0 && info->generation != pos.generation) {
-        // Stale data from old spawn → reject
+    // 2. Check generation match (Phase 6: ENABLED)
+    // Reject packets from old entity generations (prevents ghost control bugs)
+    if (info.generation != pos.generation) {
+        spdlog::debug("[AuthorityValidator] Stale generation: entity {} has gen {} but packet has gen {}",
+                     pos.entityId, info.generation, pos.generation);
         return SnapshotDecision::RejectStaleGeneration;
     }
 
-    // 3. Check if destroyed
-    if (info->destroyed) {
-        // Entity was destroyed locally → reject update
+    // 3. Check if entity is inactive
+    if (info.state == EntityState::Inactive) {
+        // Entity is not active → reject update
         return SnapshotDecision::RejectDestroyed;
     }
 

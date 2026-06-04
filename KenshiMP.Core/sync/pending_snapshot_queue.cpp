@@ -36,7 +36,11 @@ void PendingSnapshotQueue::FlushForEntity(uint32_t entityId) {
 
     auto& interpolation = Core::Get().GetInterpolation();
     for (const auto& snapshot : snapshots) {
-        interpolation.AddSnapshot(snapshot.position, snapshot.sourcePlayerId);
+        const auto& pos = snapshot.position;
+        Vec3 position(pos.posX, pos.posY, pos.posZ);
+        Quat rotation = Quat::Decompress(pos.compressedQuat);
+        interpolation.AddSnapshot(pos.entityId, snapshot.timestamp, position, rotation,
+                                  pos.moveSpeed, pos.animStateId);
     }
 
     s_pending.erase(it);

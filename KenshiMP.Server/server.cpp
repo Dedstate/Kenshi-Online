@@ -1,4 +1,5 @@
 #include "server.h"
+#include "authority_validator.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cstdlib>
@@ -805,9 +806,15 @@ void GameServer::HandlePositionUpdate(ConnectedPlayer& player, PacketReader& rea
             continue;
         }
 
+        // === SERVER AUTHORITY VALIDATION (Phase 5) ===
+        // Reject updates for entities the client doesn't own
+        if (!ServerAuthorityValidator::ValidatePositionUpdate(player.id, pos.entityId, m_entities)) {
+            continue; // Authority violation logged inside validator
+        }
+
         // Update server-side entity position
         auto it = m_entities.find(pos.entityId);
-        if (it != m_entities.end() && it->second.owner == player.id) {
+        if (it != m_entities.end()) {
             it->second.position = Vec3(pos.posX, pos.posY, pos.posZ);
             it->second.rotation = Quat::Decompress(pos.compressedQuat);
             it->second.zone = ZoneCoord::FromWorldPos(it->second.position);
@@ -829,9 +836,12 @@ void GameServer::HandleMoveCommand(ConnectedPlayer& player, PacketReader& reader
     MsgMoveCommand msg;
     if (!reader.ReadRaw(&msg, sizeof(msg))) return;
 
-    // Validate entity ownership
+    // === SERVER AUTHORITY VALIDATION (Phase 5) ===
+    if (!ServerAuthorityValidator::CanClientCommandEntity(player.id, msg.entityId, m_entities)) {
+        return; // Authority violation logged
+    }
+
     auto it = m_entities.find(msg.entityId);
-    if (it == m_entities.end() || it->second.owner != player.id) return;
 
     // Broadcast to other players
     PacketWriter writer;
@@ -845,9 +855,12 @@ void GameServer::HandleAttackIntent(ConnectedPlayer& player, PacketReader& reade
     MsgAttackIntent msg;
     if (!reader.ReadRaw(&msg, sizeof(msg))) return;
 
-    // Validate attacker ownership
+    // === SERVER AUTHORITY VALIDATION (Phase 5) ===
+    if (!ServerAuthorityValidator::CanClientCommandEntity(player.id, msg.attackerId, m_entities)) {
+        return; // Authority violation logged
+    }
+
     auto it = m_entities.find(msg.attackerId);
-    if (it == m_entities.end() || it->second.owner != player.id) return;
 
     // Validate target exists and is alive
     auto targetIt = m_entities.find(msg.targetId);
@@ -1017,6 +1030,7 @@ void GameServer::BroadcastPositions() {
             auto* entity = nearby[i];
             CharacterPosition pos;
             pos.entityId = entity->id;
+            pos.generation = entity->generation; // Phase 6: include generation
             pos.posX = entity->position.x;
             pos.posY = entity->position.y;
             pos.posZ = entity->position.z;
@@ -2402,7 +2416,7 @@ void GameServer::UpdateMasterConnection(float deltaTime) {
 // ── Player Ready Handshake ──
 // Called when a client sends C2S_PlayerReady (after OnGameLoaded)
 // Server tracks ready players and broadcasts S2C_AllPlayersReady when ALL are ready
-void GameServer::HandlePlayerReady(Player& player) {
+void GameServer::HandlePlayerReady(ConnectedPlayer& player) {
     if (player.isReady) {
         spdlog::debug("GameServer: Player {} already marked ready", player.id);
         return;
@@ -2422,13 +2436,11 @@ void GameServer::HandlePlayerReady(Player& player) {
 
         PacketWriter writer;
         writer.WriteHeader(MessageType::S2C_AllPlayersReady);
-        BroadcastReliable(writer.Data(), writer.Size());
+        Broadcast(writer.Data(), writer.Size(), KMP_CHANNEL_RELIABLE_ORDERED, ENET_PACKET_FLAG_RELIABLE);
 
         // Log for each player
-        for (auto& p : m_players) {
-            if (p.connected) {
-                spdlog::info("GameServer: Sent AllPlayersReady to {} ({})", p.id, p.name);
-            }
+        for (auto& [pid, p] : m_players) {
+            spdlog::info("GameServer: Sent AllPlayersReady to {} ({})", p.id, p.name);
         }
     } else {
         spdlog::info("GameServer: Waiting for more players ({}/{} ready)", ready, connected);
@@ -2437,16 +2449,17 @@ void GameServer::HandlePlayerReady(Player& player) {
 
 int GameServer::GetReadyPlayerCount() const {
     int count = 0;
-    for (const auto& p : m_players) {
-        if (p.connected && p.isReady) count++;
+    for (const auto& [pid, p] : m_players) {
+        if (p.isReady) count++;
     }
     return count;
 }
 
 int GameServer::GetConnectedPlayerCount() const {
     int count = 0;
-    for (const auto& p : m_players) {
-        if (p.connected) count++;
+    for (const auto& [pid, p] : m_players) {
+        (void)pid; // Suppress unused warning
+        count++;
     }
     return count;
 }

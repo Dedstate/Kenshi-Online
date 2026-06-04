@@ -13,6 +13,7 @@
 #include "../hooks/ai_hooks.h"
 #include "../sync/authority_validator.h"
 #include "../sync/pending_snapshot_queue.h"
+#include "../sync/deferred_spawn_queue.h"
 #include "kmp/protocol.h"
 #include "kmp/messages.h"
 #include "kmp/memory.h"
@@ -109,14 +110,29 @@ static bool SEH_WriteLimbHealthToChar(void* character, const float health[7]) {
 // Handles incoming packets from the server and dispatches to appropriate systems.
 class PacketHandler {
 public:
-    // Forward declarations
-    static void HandleAllPlayersReady();
-
     static void Initialize() {
         Core::Get().GetClient().SetPacketCallback(
             [](const uint8_t* data, size_t size, int channel) {
                 HandlePacket(data, size, channel);
             });
+    }
+
+    // ── All Players Ready (Server → Client) ──
+    // Server sends this when ALL connected players have loaded their games
+    // NOW we can safely spawn characters and activate full sync
+    static void HandleAllPlayersReady() {
+        auto& core = Core::Get();
+
+        spdlog::info("PacketHandler: ALL PLAYERS READY - Server says we can spawn now!");
+        core.GetNativeHud().AddSystemMessage("All players ready - spawning characters!");
+        core.GetNativeHud().LogStep("SYNC", "All players ready - activating spawn");
+
+        // FIXED: Process queued spawn packets that were deferred during load
+        size_t queueSize = DeferredSpawnQueue::Size();
+        if (queueSize > 0) {
+            spdlog::info("PacketHandler: Processing {} deferred spawns", queueSize);
+            DeferredSpawnQueue::ProcessAll();
+        }
     }
 
     static void HandlePacket(const uint8_t* data, size_t size, int channel) {
@@ -578,7 +594,27 @@ private:
         if (!core.IsGameLoaded() || core.GetClientPhase() < ClientPhase::GameReady) {
             spdlog::warn("PacketHandler: Deferring entity spawn {} - game not ready (phase={})",
                          entityId, ClientPhaseToString(core.GetClientPhase()));
-            // TODO: Queue for later spawn when GameReady
+
+            // FIXED: Queue spawn for later processing when game ready
+            DeferredSpawn ds;
+            ds.entityId = entityId;
+            ds.generation = 0; // Will be populated once generation tracking is complete
+            ds.type = type;
+            ds.ownerId = ownerId;
+            ds.templateId = templateId;
+            ds.posX = px;
+            ds.posY = py;
+            ds.posZ = pz;
+            ds.compressedQuat = compQuat;
+            ds.factionId = factionId;
+            ds.templateName = templateName;
+            ds.hasExtendedHealth = hasExtended;
+            ds.isAlive = isAlive;
+            if (hasExtended) {
+                for (int i = 0; i < 7; i++) ds.health[i] = healthData[i];
+            }
+            ds.timestamp = SessionTime();
+            DeferredSpawnQueue::Queue(ds);
             return;
         }
 
@@ -604,6 +640,9 @@ private:
 
         // Register in entity registry as remote (gameObject=nullptr until spawned)
         registry.RegisterRemote(entityId, static_cast<EntityType>(type), ownerId, spawnPos);
+
+        // Flush any queued position updates that arrived before this spawn message
+        PendingSnapshotQueue::FlushForEntity(entityId);
 
         // Add initial interpolation snapshot
         float now = SessionTime();
@@ -1815,23 +1854,88 @@ private:
 
     // ── All Players Ready (Server → Client) ──
     // Server sends this when ALL connected players have loaded their games
-    // NOW we can safely spawn characters and activate full sync
-    static void HandleAllPlayersReady() {
-        auto& core = Core::Get();
-
-        spdlog::info("PacketHandler: ALL PLAYERS READY - Server says we can spawn now!");
-        core.GetNativeHud().AddSystemMessage("All players ready - spawning characters!");
-        core.GetNativeHud().LogStep("SYNC", "All players ready - activating spawn");
-
-        // TODO: Process queued spawn packets that were deferred during load
-        // For now, just log that we're ready
-        // Future: core.GetSpawnQueue().ProcessAll();
-    }
 };
 
 // Called from core.cpp to initialize packet handling
 void InitPacketHandler() {
     PacketHandler::Initialize();
+}
+
+// Process a deferred spawn packet (called from DeferredSpawnQueue::ProcessAll)
+void ProcessDeferredSpawn(const DeferredSpawn& ds) {
+    // Reconstruct the spawn processing logic from HandleEntitySpawn
+    // but skip the "game ready" gate since we're now processing after AllPlayersReady
+
+    auto& core = Core::Get();
+    auto& registry = core.GetEntityRegistry();
+
+    Vec3 spawnPos(ds.posX, ds.posY, ds.posZ);
+    Quat rot = Quat::Decompress(ds.compressedQuat);
+
+    spdlog::info("ProcessDeferredSpawn: Entity id={} type={} owner={} template='{}' at ({:.1f}, {:.1f}, {:.1f})",
+                 ds.entityId, ds.type, ds.ownerId, ds.templateName, ds.posX, ds.posY, ds.posZ);
+
+    // Skip own entity remapping (only process remote entities in deferred queue)
+    if (ds.ownerId == core.GetLocalPlayerId()) {
+        spdlog::debug("ProcessDeferredSpawn: Skipping own entity {}", ds.entityId);
+        return;
+    }
+
+    // Register in entity registry
+    registry.RegisterRemote(ds.entityId, static_cast<EntityType>(ds.type), ds.ownerId, spawnPos);
+
+    // Flush any queued position updates
+    PendingSnapshotQueue::FlushForEntity(ds.entityId);
+
+    // Add initial interpolation snapshot
+    float now = SessionTime();
+    core.GetInterpolation().AddSnapshot(ds.entityId, now, spawnPos, rot);
+
+    // Try mod character linking
+    void* existingChar = core.FindModCharacterBySlot(static_cast<int>(ds.ownerId));
+    EntityID existingLinkedId = existingChar ? registry.GetNetId(existingChar) : INVALID_ENTITY;
+
+    if (existingChar && existingLinkedId == INVALID_ENTITY) {
+        registry.SetGameObject(ds.entityId, existingChar);
+        registry.UpdatePosition(ds.entityId, spawnPos);
+        ai_hooks::MarkRemoteControlled(existingChar);
+
+        // Apply position, health, etc. (same as HandleEntitySpawn)
+        if (core.IsGameLoaded() && (spawnPos.x != 0.f || spawnPos.y != 0.f || spawnPos.z != 0.f)) {
+            core.GetCommandQueue().Push({[existingChar, spawnPos, ds]() {
+                auto& core = Core::Get();
+                if (core.IsGameLoaded() && core.GetClientPhase() >= ClientPhase::GameReady) {
+                    if (!SEH_WritePositionToChar(existingChar, spawnPos.x, spawnPos.y, spawnPos.z)) {
+                        spdlog::warn("ProcessDeferredSpawn: WritePosition failed for entity {}", ds.entityId);
+                    }
+                }
+            }});
+        }
+
+        SEH_OnRemoteCharSpawned(ds.entityId, existingChar, ds.ownerId);
+        core.GetPlayerController().WriteGameDataNameForModLink(existingChar, ds.ownerId);
+        SEH_ScheduleAnimProbe(existingChar);
+
+        if (ds.hasExtendedHealth && core.IsGameLoaded()) {
+            registry.UpdateLimbHealth(ds.entityId, ds.health);
+            SEH_WriteLimbHealthToChar(existingChar, ds.health);
+        }
+
+        spdlog::info("ProcessDeferredSpawn: Linked mod character for entity {}", ds.entityId);
+    } else {
+        // Fallback to factory spawn
+        SpawnRequest req;
+        req.netId = ds.entityId;
+        req.owner = ds.ownerId;
+        req.type = static_cast<EntityType>(ds.type);
+        req.templateName = ds.templateName;
+        req.position = spawnPos;
+        req.rotation = rot;
+        req.templateId = ds.templateId;
+        req.factionId = ds.factionId;
+        core.GetSpawnManager().QueueSpawn(req);
+        spdlog::info("ProcessDeferredSpawn: Queued factory spawn for entity {}", ds.entityId);
+    }
 }
 
 } // namespace kmp

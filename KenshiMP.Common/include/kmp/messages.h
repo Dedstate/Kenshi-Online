@@ -48,6 +48,7 @@ struct MsgPlayerLeft {
 
 struct CharacterPosition {
     EntityID entityId;
+    uint32_t generation;     // Phase 6: prevents ghost control when entity IDs are reused
     float    posX, posY, posZ;
     uint32_t compressedQuat; // Smallest-three encoded
     uint8_t  animStateId;
@@ -115,6 +116,7 @@ struct MsgCombatDeath {
 
 struct MsgEntitySpawn {
     EntityID    entityId;
+    uint32_t    generation;   // Phase 6: entity generation counter
     EntityType  type;
     PlayerID    ownerId;      // 0 = server-owned (NPC)
     uint32_t    templateId;   // Game data template reference
@@ -126,7 +128,8 @@ struct MsgEntitySpawn {
 
 struct MsgEntityDespawn {
     EntityID entityId;
-    uint8_t  reason; // 0=normal, 1=killed, 2=out of range
+    uint32_t generation; // Phase 6: verify we're despawning the right generation
+    uint8_t  reason;     // 0=normal, 1=killed, 2=out of range
 };
 
 // ── Stats Messages ──
