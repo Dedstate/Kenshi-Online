@@ -1,116 +1,229 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal EnableExtensions DisableDelayedExpansion
 title KenshiMP Uninstaller
 color 0C
 
+set "EXIT_CODE=0"
+set "QUIET=0"
+if /I "%~2"=="/quiet" set "QUIET=1"
+
 echo.
 echo  ============================================
-echo   KenshiMP - Uninstaller
+echo   KenshiMP - Safe Windows Uninstaller
 echo  ============================================
 echo.
 
-:: ── Auto-detect Kenshi directory ──
-set "KENSHI_DIR="
+set "KENSHI_DIR=%~1"
+if defined KENSHI_DIR goto :validate_kenshi
 
-if exist "%~dp0kenshi_x64.exe" (
-    set "KENSHI_DIR=%~dp0"
-    goto :found
+if exist "%~dp0kenshi_x64.exe" set "KENSHI_DIR=%~dp0"
+if defined KENSHI_DIR goto :validate_kenshi
+if exist "%~dp0..\kenshi_x64.exe" set "KENSHI_DIR=%~dp0.."
+if defined KENSHI_DIR goto :validate_kenshi
+if exist "C:\Program Files (x86)\Steam\steamapps\common\Kenshi\kenshi_x64.exe" set "KENSHI_DIR=C:\Program Files (x86)\Steam\steamapps\common\Kenshi"
+if defined KENSHI_DIR goto :validate_kenshi
+if exist "C:\GOG Games\Kenshi\kenshi_x64.exe" set "KENSHI_DIR=C:\GOG Games\Kenshi"
+if defined KENSHI_DIR goto :validate_kenshi
+
+if "%QUIET%"=="1" (
+    echo  [ERROR] Kenshi was not found and interactive prompting is disabled.
+    goto :invalid_kenshi
 )
-if exist "%~dp0..\kenshi_x64.exe" (
-    set "KENSHI_DIR=%~dp0..\"
-    goto :found
-)
-set "STEAM_KENSHI=C:\Program Files (x86)\Steam\steamapps\common\Kenshi"
-if exist "%STEAM_KENSHI%\kenshi_x64.exe" (
-    set "KENSHI_DIR=%STEAM_KENSHI%"
-    goto :found
-)
-echo  Could not find Kenshi. Enter path:
+
+echo  Kenshi could not be auto-detected.
+echo  Enter the folder containing kenshi_x64.exe.
 set /p "KENSHI_DIR=Path: "
+
+:validate_kenshi
+if not defined KENSHI_DIR goto :invalid_kenshi
+for %%I in ("%KENSHI_DIR%") do set "KENSHI_DIR=%%~fI"
 if not exist "%KENSHI_DIR%\kenshi_x64.exe" (
-    echo  [ERROR] kenshi_x64.exe not found.
-    pause
-    exit /b 1
+    echo  [ERROR] kenshi_x64.exe was not found in:
+    echo          "%KENSHI_DIR%"
+    goto :invalid_kenshi
 )
 
-:found
-if "%KENSHI_DIR:~-1%"=="\" set "KENSHI_DIR=%KENSHI_DIR:~0,-1%"
-echo  Found Kenshi at: %KENSHI_DIR%
+echo  Found Kenshi at: "%KENSHI_DIR%"
 echo.
 
-:: Check if running
 tasklist /FI "IMAGENAME eq kenshi_x64.exe" 2>NUL | find /I "kenshi_x64.exe" >NUL
-if %errorlevel% equ 0 (
-    echo  [WARNING] Kenshi is running. Close it first.
-    pause
-    exit /b 1
+if not errorlevel 1 (
+    echo  [ERROR] Kenshi is running. Close it before uninstalling.
+    set "EXIT_CODE=3"
+    goto :finish
 )
 
-set "BACKUP_DIR=%KENSHI_DIR%\KenshiMP_backup"
-
-echo  Removing KenshiMP...
-echo.
-
-:: Remove DLL
-if exist "%KENSHI_DIR%\KenshiMP.Core.dll" (
-    del /F "%KENSHI_DIR%\KenshiMP.Core.dll"
-    echo  [OK] Removed KenshiMP.Core.dll
+set "STATE_DIR=%KENSHI_DIR%\.KenshiMP-install-state"
+if not exist "%STATE_DIR%" (
+    echo  [OK] No managed KenshiMP installation was found.
+    echo       Nothing was removed. This is safe on repeated runs.
+    set "EXIT_CODE=0"
+    goto :finish
 )
+if not exist "%STATE_DIR%\installed.marker" goto :unsafe_state
+findstr /X /C:"KenshiMP managed installation v1" "%STATE_DIR%\installed.marker" >NUL 2>&1
+if errorlevel 1 goto :unsafe_state
+call :validate_state
+if errorlevel 1 goto :unsafe_state
 
-:: Remove multiplayer panel layout
-if exist "%KENSHI_DIR%\data\gui\layout\Kenshi_MultiplayerPanel.layout" (
-    del /F "%KENSHI_DIR%\data\gui\layout\Kenshi_MultiplayerPanel.layout"
-    echo  [OK] Removed Kenshi_MultiplayerPanel.layout
-)
+call :probe_directory "%KENSHI_DIR%"
+if errorlevel 1 goto :permission_error
+call :probe_directory "%KENSHI_DIR%\data"
+if errorlevel 1 goto :permission_error
+call :probe_directory "%KENSHI_DIR%\data\gui\layout"
+if errorlevel 1 goto :permission_error
+call :probe_file "%KENSHI_DIR%\KenshiMP.Core.dll"
+if errorlevel 1 goto :permission_error
+call :probe_file "%KENSHI_DIR%\KenshiMP.Server.exe"
+if errorlevel 1 goto :permission_error
+call :probe_file "%KENSHI_DIR%\server.json"
+if errorlevel 1 goto :permission_error
+call :probe_file "%KENSHI_DIR%\Plugins_x64.cfg"
+if errorlevel 1 goto :permission_error
+call :probe_file "%KENSHI_DIR%\data\gui\layout\Kenshi_MainMenu.layout"
+if errorlevel 1 goto :permission_error
+call :probe_file "%KENSHI_DIR%\data\gui\layout\Kenshi_MultiplayerPanel.layout"
+if errorlevel 1 goto :permission_error
+call :probe_file "%KENSHI_DIR%\data\gui\layout\Kenshi_MultiplayerHUD.layout"
+if errorlevel 1 goto :permission_error
+call :probe_file "%KENSHI_DIR%\data\kenshi-online.mod"
+if errorlevel 1 goto :permission_error
+call :probe_file "%KENSHI_DIR%\mods\kenshi-online\kenshi-online.mod"
+if errorlevel 1 goto :permission_error
+call :probe_file "%KENSHI_DIR%\data\__mods.list"
+if errorlevel 1 goto :permission_error
 
-:: Remove server
-if exist "%KENSHI_DIR%\KenshiMP.Server.exe" (
-    del /F "%KENSHI_DIR%\KenshiMP.Server.exe"
-    echo  [OK] Removed KenshiMP.Server.exe
-)
+echo  Restoring files recorded by the KenshiMP installer...
+call :restore_original "%KENSHI_DIR%\KenshiMP.Core.dll" "core"
+if errorlevel 1 goto :restore_failed
+call :restore_original "%KENSHI_DIR%\KenshiMP.Server.exe" "server"
+if errorlevel 1 goto :restore_failed
+call :restore_original "%KENSHI_DIR%\server.json" "server-config"
+if errorlevel 1 goto :restore_failed
+call :restore_original "%KENSHI_DIR%\Plugins_x64.cfg" "plugins-config"
+if errorlevel 1 goto :restore_failed
+call :restore_original "%KENSHI_DIR%\data\gui\layout\Kenshi_MainMenu.layout" "main-menu"
+if errorlevel 1 goto :restore_failed
+call :restore_original "%KENSHI_DIR%\data\gui\layout\Kenshi_MultiplayerPanel.layout" "panel-layout"
+if errorlevel 1 goto :restore_failed
+call :restore_original "%KENSHI_DIR%\data\gui\layout\Kenshi_MultiplayerHUD.layout" "hud-layout"
+if errorlevel 1 goto :restore_failed
+call :restore_original "%KENSHI_DIR%\data\kenshi-online.mod" "data-mod"
+if errorlevel 1 goto :restore_failed
+call :restore_original "%KENSHI_DIR%\mods\kenshi-online\kenshi-online.mod" "folder-mod"
+if errorlevel 1 goto :restore_failed
+call :restore_original "%KENSHI_DIR%\data\__mods.list" "mods-list"
+if errorlevel 1 goto :restore_failed
 
-:: Remove multiplayer mod
-if exist "%KENSHI_DIR%\data\kenshi-online.mod" (
-    del /F "%KENSHI_DIR%\data\kenshi-online.mod"
-    echo  [OK] Removed data\kenshi-online.mod
-)
 if exist "%KENSHI_DIR%\mods\kenshi-online" (
-    rmdir /S /Q "%KENSHI_DIR%\mods\kenshi-online"
-    echo  [OK] Removed mods\kenshi-online\
-)
-
-:: Restore backups
-if exist "%BACKUP_DIR%\Plugins_x64.cfg.bak" (
-    copy /Y "%BACKUP_DIR%\Plugins_x64.cfg.bak" "%KENSHI_DIR%\Plugins_x64.cfg" >nul
-    echo  [OK] Restored original Plugins_x64.cfg
-)
-
-if exist "%BACKUP_DIR%\Kenshi_MainMenu.layout.bak" (
-    copy /Y "%BACKUP_DIR%\Kenshi_MainMenu.layout.bak" "%KENSHI_DIR%\data\gui\layout\Kenshi_MainMenu.layout" >nul
-    echo  [OK] Restored original Kenshi_MainMenu.layout
-)
-
-:: Clean up backup dir
-if exist "%BACKUP_DIR%" (
-    rmdir /S /Q "%BACKUP_DIR%" 2>nul
-    echo  [OK] Removed backup folder
-)
-
-:: Remove config
-set "CONFIG_DIR=%APPDATA%\KenshiMP"
-if exist "%CONFIG_DIR%" (
-    echo.
-    set /p "DELCONFIG=Delete KenshiMP config (%CONFIG_DIR%)? [y/N]: "
-    if /i "!DELCONFIG!"=="y" (
-        rmdir /S /Q "%CONFIG_DIR%"
-        echo  [OK] Removed config folder
+    rmdir "%KENSHI_DIR%\mods\kenshi-online" >NUL 2>&1
+    if exist "%KENSHI_DIR%\mods\kenshi-online" (
+        echo  [INFO] Preserved non-package files in mods\kenshi-online.
     )
 )
 
+call :remove_state_dir
+if exist "%STATE_DIR%" goto :restore_failed
+
 echo.
-echo  ============================================
-echo   KenshiMP has been uninstalled.
-echo   Your game is back to vanilla.
-echo  ============================================
+echo  [OK] KenshiMP was uninstalled. Original files were restored.
+set "EXIT_CODE=0"
+goto :finish
+
+:invalid_kenshi
+set "EXIT_CODE=1"
+goto :finish
+
+:permission_error
+echo  [ERROR] Kenshi files are not writable.
+echo          Run this uninstaller with permission to modify the Kenshi directory.
+set "EXIT_CODE=3"
+goto :finish
+
+:unsafe_state
+echo  [ERROR] KenshiMP installer state is incomplete or unrecognized:
+echo          "%STATE_DIR%"
+echo          Nothing was removed. Inspect or move the state directory.
+set "EXIT_CODE=4"
+goto :finish
+
+:restore_failed
+echo  [ERROR] Uninstall could not restore every recorded file.
+echo          Installer state was preserved at:
+echo          "%STATE_DIR%"
+echo          Resolve the reported filesystem problem, then run uninstall again.
+set "EXIT_CODE=4"
+goto :finish
+
+:probe_directory
+set "PROBE_FILE=%~1\.kenshimp-write-test-%RANDOM%-%RANDOM%.tmp"
+>"%PROBE_FILE%" echo write-test
+if not exist "%PROBE_FILE%" exit /b 1
+del /F /Q "%PROBE_FILE%" >NUL 2>&1
+if exist "%PROBE_FILE%" exit /b 1
+exit /b 0
+
+:probe_file
+if not exist "%~1" exit /b 0
+set "KMP_PROBE_FILE=%~1"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $stream = [IO.File]::Open($env:KMP_PROBE_FILE, 'Open', 'Write', 'ReadWrite'); $stream.Dispose(); exit 0 } catch { exit 1 }" >NUL 2>&1
+exit /b %ERRORLEVEL%
+
+:restore_original
+if exist "%STATE_DIR%\%~2.restore" (
+    if not exist "%STATE_DIR%\%~2.bak" (
+        echo  [ERROR] Missing backup for %~2.
+        exit /b 1
+    )
+    copy /B /Y "%STATE_DIR%\%~2.bak" "%~1" >NUL 2>&1
+    if errorlevel 1 (
+        echo  [ERROR] Could not restore: "%~1"
+        exit /b 1
+    )
+    echo  [OK] Restored "%~1"
+    exit /b 0
+)
+if exist "%STATE_DIR%\%~2.remove" (
+    if exist "%~1" del /F /Q "%~1" >NUL 2>&1
+    if exist "%~1" (
+        echo  [ERROR] Could not remove: "%~1"
+        exit /b 1
+    )
+    echo  [OK] Removed package-owned "%~1"
+    exit /b 0
+)
+echo  [ERROR] Installer state is incomplete for %~2.
+exit /b 1
+
+:validate_state
+for %%K in (core server server-config plugins-config main-menu panel-layout hud-layout data-mod folder-mod mods-list) do (
+    call :validate_state_entry "%%K"
+    if errorlevel 1 exit /b 1
+)
+exit /b 0
+
+:validate_state_entry
+if exist "%STATE_DIR%\%~1.restore" (
+    if exist "%STATE_DIR%\%~1.remove" exit /b 1
+    if not exist "%STATE_DIR%\%~1.bak" exit /b 1
+    exit /b 0
+)
+if exist "%STATE_DIR%\%~1.remove" exit /b 0
+exit /b 1
+
+:remove_state_dir
+for %%K in (core server server-config plugins-config main-menu panel-layout hud-layout data-mod folder-mod mods-list) do (
+    if exist "%STATE_DIR%\%%K.bak" del /F /Q "%STATE_DIR%\%%K.bak" >NUL 2>&1
+    if exist "%STATE_DIR%\%%K.restore" del /F /Q "%STATE_DIR%\%%K.restore" >NUL 2>&1
+    if exist "%STATE_DIR%\%%K.remove" del /F /Q "%STATE_DIR%\%%K.remove" >NUL 2>&1
+)
+if exist "%STATE_DIR%\installed.marker" del /F /Q "%STATE_DIR%\installed.marker" >NUL 2>&1
+if exist "%STATE_DIR%\transaction.marker" del /F /Q "%STATE_DIR%\transaction.marker" >NUL 2>&1
+rmdir "%STATE_DIR%" >NUL 2>&1
+exit /b 0
+
+:finish
 echo.
-pause
+if not "%EXIT_CODE%"=="0" echo  Uninstaller exit code: %EXIT_CODE%
+if "%QUIET%"=="0" pause
+exit /b %EXIT_CODE%
