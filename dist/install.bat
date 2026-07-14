@@ -75,8 +75,33 @@ if %errorlevel% equ 0 (
     exit /b 1
 )
 
+:: ── Verify required files are present in the installer ──
+set "MISSING_FILES="
+if not exist "%~dp0KenshiMP.Core.dll" set "MISSING_FILES=!MISSING_FILES! KenshiMP.Core.dll"
+if not exist "%~dp0Kenshi_MainMenu.layout" set "MISSING_FILES=!MISSING_FILES! Kenshi_MainMenu.layout"
+if not exist "%~dp0Kenshi_MultiplayerPanel.layout" set "MISSING_FILES=!MISSING_FILES! Kenshi_MultiplayerPanel.layout"
+
+if not "!MISSING_FILES!"=="" (
+    echo  [ERROR] The installer package is incomplete.
+    echo  Missing files:!MISSING_FILES!
+    echo.
+    echo  Re-download the latest release from:
+    echo    https://github.com/WokiDev/Kenshi-Online/releases
+    pause
+    exit /b 1
+)
+
+:: ── Ensure required directories exist ──
+if not exist "%KENSHI_DIR%\data\gui\layout" (
+    echo  [WARNING] Kenshi GUI layout folder is missing.
+    echo  Path: %KENSHI_DIR%\data\gui\layout
+    echo  Verify your Kenshi installation is complete (Steam: Verify integrity).
+    pause
+    exit /b 1
+)
+
 :: ── Create backups ──
-echo  [1/5] Creating backups...
+echo  [1/7] Creating backups...
 
 set "BACKUP_DIR=%KENSHI_DIR%\KenshiMP_backup"
 if not exist "%BACKUP_DIR%" mkdir "%BACKUP_DIR%"
@@ -95,85 +120,71 @@ if exist "%KENSHI_DIR%\data\gui\layout\Kenshi_MainMenu.layout" (
     )
 )
 
-:: ── Copy DLL ──
-echo  [2/5] Installing KenshiMP.Core.dll...
-
-if exist "%~dp0KenshiMP.Core.dll" (
-    copy /Y "%~dp0KenshiMP.Core.dll" "%KENSHI_DIR%\KenshiMP.Core.dll" >nul
-    if errorlevel 1 (
-        echo  [ERROR] Failed to copy DLL. Is Kenshi running?
-        pause
-        exit /b 1
+if exist "%KENSHI_DIR%\data\__mods.list" (
+    if not exist "%BACKUP_DIR%\__mods.list.bak" (
+        copy /Y "%KENSHI_DIR%\data\__mods.list" "%BACKUP_DIR%\__mods.list.bak" >nul
+        echo         Backed up __mods.list
     )
-    echo         Copied KenshiMP.Core.dll
-) else (
-    echo  [ERROR] KenshiMP.Core.dll not found in installer folder!
+)
+
+:: ── Copy DLL ──
+echo  [2/7] Installing KenshiMP.Core.dll...
+
+copy /Y "%~dp0KenshiMP.Core.dll" "%KENSHI_DIR%\KenshiMP.Core.dll" >nul
+if errorlevel 1 (
+    echo  [ERROR] Failed to copy DLL. Is Kenshi running? Try running as Administrator.
     pause
     exit /b 1
 )
+echo         Copied KenshiMP.Core.dll
 
 :: ── Patch Plugins_x64.cfg ──
-echo  [3/5] Patching Plugins_x64.cfg...
+:: We never blindly append: that risks producing
+::   Plugin=RenderSystem_Direct3D11Plugin=KenshiMP.Core
+:: on a single line if the file lacks a trailing newline.
+:: PowerShell rewrites the file with consistent CRLF line endings.
+echo  [3/7] Patching Plugins_x64.cfg...
 
-findstr /C:"Plugin=KenshiMP.Core" "%KENSHI_DIR%\Plugins_x64.cfg" >nul 2>&1
+findstr /B /C:"Plugin=KenshiMP.Core" "%KENSHI_DIR%\Plugins_x64.cfg" >nul 2>&1
 if errorlevel 1 (
-    echo Plugin=KenshiMP.Core>> "%KENSHI_DIR%\Plugins_x64.cfg"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Join-Path '%KENSHI_DIR%' 'Plugins_x64.cfg'; $lines = @(); if (Test-Path $p) { $lines = @(Get-Content -LiteralPath $p) }; $lines = @($lines | Where-Object { $_ -ne 'Plugin=KenshiMP.Core' }); $lines += 'Plugin=KenshiMP.Core'; Set-Content -LiteralPath $p -Value $lines -Encoding ASCII"
+    if errorlevel 1 (
+        echo  [ERROR] Failed to patch Plugins_x64.cfg. Try running as Administrator.
+        pause
+        exit /b 1
+    )
     echo         Added KenshiMP.Core plugin entry
 ) else (
     echo         Plugin entry already exists
 )
 
-:: ── Patch Main Menu Layout ──
-echo  [4/5] Patching main menu layout...
+:: ── Install Main Menu Layout (always overwrite with pre-patched copy) ──
+:: The previous version used a fragile in-place PowerShell regex insertion
+:: that often produced malformed XML on user systems. The shipped
+:: Kenshi_MainMenu.layout is a vanilla layout with the MULTIPLAYER button
+:: already in place — overwriting is reliable across Kenshi versions and
+:: locales because the layout file has not changed since FCS 1.0.
+:: The original is preserved in KenshiMP_backup\.
+echo  [4/7] Installing main menu layout...
 
-findstr /C:"MultiplayerButton" "%KENSHI_DIR%\data\gui\layout\Kenshi_MainMenu.layout" >nul 2>&1
+copy /Y "%~dp0Kenshi_MainMenu.layout" "%KENSHI_DIR%\data\gui\layout\Kenshi_MainMenu.layout" >nul
 if errorlevel 1 (
-    echo         Adding MULTIPLAYER button to main menu...
-
-    :: We need to insert the button before the OPTIONS button.
-    :: The OPTIONS button has name="OptionsButton".
-    :: We'll use PowerShell for reliable XML insertion.
-
-    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$file = '%KENSHI_DIR%\data\gui\layout\Kenshi_MainMenu.layout';" ^
-        "$content = Get-Content $file -Raw;" ^
-        "$mpButton = @'" ^
-"            <Widget type=\""Button\"" skin=\""Kenshi_Button1\"" position_real=\""0.260417 0.582407 0.15625 0.0638889\"" name=\""MultiplayerButton\"">`n" ^
-"                <Property key=\""Caption\"" value=\""MULTIPLAYER\""/>`n" ^
-"                <Property key=\""FontName\"" value=\""Kenshi_PaintedTextFont_Large\""/>`n" ^
-"            </Widget>`n" ^
-"'@;" ^
-        "if ($content -match 'OptionsButton') {" ^
-        "  $optLine = '            <Widget type=\"\"Button\"\" skin=\"\"Kenshi_Button1\"\".*name=\"\"OptionsButton\"\"';" ^
-        "  $content = $content -replace '(?m)(^\s*<Widget[^>]+name=\"\"OptionsButton\"\")', ($mpButton + \"`n`$1\");" ^
-        "  Set-Content $file $content -NoNewline;" ^
-        "  Write-Host '        MULTIPLAYER button added';" ^
-        "} else {" ^
-        "  Write-Host '        [WARNING] Could not find OptionsButton anchor';" ^
-        "}"
-
-    if errorlevel 1 (
-        echo         [WARNING] Auto-patch failed. Copying pre-patched layout...
-        if exist "%~dp0Kenshi_MainMenu.layout" (
-            copy /Y "%~dp0Kenshi_MainMenu.layout" "%KENSHI_DIR%\data\gui\layout\Kenshi_MainMenu.layout" >nul
-            echo         Copied pre-patched Kenshi_MainMenu.layout
-        )
-    )
-) else (
-    echo         MULTIPLAYER button already present
-)
-
-:: ── Copy Multiplayer Layouts ──
-echo  [5/6] Installing multiplayer layouts...
-
-if exist "%~dp0Kenshi_MultiplayerPanel.layout" (
-    copy /Y "%~dp0Kenshi_MultiplayerPanel.layout" "%KENSHI_DIR%\data\gui\layout\Kenshi_MultiplayerPanel.layout" >nul
-    echo         Copied Kenshi_MultiplayerPanel.layout
-) else (
-    echo  [ERROR] Kenshi_MultiplayerPanel.layout not found in installer folder!
+    echo  [ERROR] Failed to install Kenshi_MainMenu.layout.
     pause
     exit /b 1
 )
+echo         Installed Kenshi_MainMenu.layout (with MULTIPLAYER button)
+
+:: ── Copy Multiplayer Layouts ──
+echo  [5/7] Installing multiplayer layouts...
+
+copy /Y "%~dp0Kenshi_MultiplayerPanel.layout" "%KENSHI_DIR%\data\gui\layout\Kenshi_MultiplayerPanel.layout" >nul
+if errorlevel 1 (
+    echo  [ERROR] Failed to install Kenshi_MultiplayerPanel.layout.
+    pause
+    exit /b 1
+)
+echo         Copied Kenshi_MultiplayerPanel.layout
 
 if exist "%~dp0Kenshi_MultiplayerHUD.layout" (
     copy /Y "%~dp0Kenshi_MultiplayerHUD.layout" "%KENSHI_DIR%\data\gui\layout\Kenshi_MultiplayerHUD.layout" >nul
@@ -188,21 +199,17 @@ echo  [6/7] Installing kenshi-online.mod...
 if exist "%~dp0kenshi-online.mod" (
     :: Copy to data/ (always loaded by the game engine)
     copy /Y "%~dp0kenshi-online.mod" "%KENSHI_DIR%\data\kenshi-online.mod" >nul
-    echo         Copied kenshi-online.mod to data/
+    echo         Copied kenshi-online.mod to data\
 
     :: Also copy to mods/kenshi-online/ (standard mod location)
     if not exist "%KENSHI_DIR%\mods\kenshi-online" mkdir "%KENSHI_DIR%\mods\kenshi-online"
     copy /Y "%~dp0kenshi-online.mod" "%KENSHI_DIR%\mods\kenshi-online\kenshi-online.mod" >nul
-    echo         Copied kenshi-online.mod to mods/
+    echo         Copied kenshi-online.mod to mods\
 
-    :: Add to __mods.list if not present
-    findstr /C:"kenshi-online" "%KENSHI_DIR%\data\__mods.list" >nul 2>&1
-    if errorlevel 1 (
-        echo kenshi-online>> "%KENSHI_DIR%\data\__mods.list"
-        echo         Added kenshi-online to mod load list
-    ) else (
-        echo         kenshi-online already in mod load list
-    )
+    :: Add to __mods.list if not present, normalising line endings via PowerShell.
+    if not exist "%KENSHI_DIR%\data\__mods.list" type nul > "%KENSHI_DIR%\data\__mods.list"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Join-Path '%KENSHI_DIR%' 'data\__mods.list'; $lines = @(); if (Test-Path $p) { $lines = @(Get-Content -LiteralPath $p) }; $lines = @($lines | Where-Object { $_ -ne 'kenshi-online' -and $_ -ne '' }); $lines += 'kenshi-online'; Set-Content -LiteralPath $p -Value $lines -Encoding ASCII"
+    echo         Registered kenshi-online in mod load list
 ) else (
     echo         [INFO] kenshi-online.mod not in package (mod template spawning disabled)
 )
