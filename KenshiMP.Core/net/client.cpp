@@ -166,12 +166,20 @@ void NetworkClient::Update() {
 }
 
 void NetworkClient::Send(const uint8_t* data, size_t len, int channel, uint32_t flags) {
-    if (!m_connected || !m_serverPeer) return;
-
+    // Take the lock first, then re-check connection state. The peer can be
+    // reset to nullptr by Update() running on a different thread between the
+    // check and the enet_peer_send call below — without the lock the send
+    // would touch freed memory and crash (#69).
     std::lock_guard lock(m_enetMutex);
+    if (!m_connected || !m_serverPeer || !m_host) return;
+    if (!data || len == 0) return;
+
     ENetPacket* packet = enet_packet_create(data, len, flags);
-    if (packet) {
-        enet_peer_send(m_serverPeer, channel, packet);
+    if (!packet) return;
+
+    if (enet_peer_send(m_serverPeer, channel, packet) < 0) {
+        // enet_peer_send takes ownership on success; destroy on failure.
+        enet_packet_destroy(packet);
     }
 }
 
