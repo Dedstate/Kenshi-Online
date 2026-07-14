@@ -95,7 +95,7 @@ if not "!MISSING_FILES!"=="" (
 if not exist "%KENSHI_DIR%\data\gui\layout" (
     echo  [WARNING] Kenshi GUI layout folder is missing.
     echo  Path: %KENSHI_DIR%\data\gui\layout
-    echo  Verify your Kenshi installation is complete (Steam: Verify integrity).
+    echo  Verify your Kenshi installation is complete ^(Steam: Verify integrity^).
     pause
     exit /b 1
 )
@@ -158,13 +158,13 @@ if errorlevel 1 (
     echo         Plugin entry already exists
 )
 
-:: ── Install Main Menu Layout (always overwrite with pre-patched copy) ──
-:: The previous version used a fragile in-place PowerShell regex insertion
-:: that often produced malformed XML on user systems. The shipped
-:: Kenshi_MainMenu.layout is a vanilla layout with the MULTIPLAYER button
-:: already in place — overwriting is reliable across Kenshi versions and
-:: locales because the layout file has not changed since FCS 1.0.
-:: The original is preserved in KenshiMP_backup\.
+rem -- Install Main Menu Layout: always overwrite with pre-patched copy --
+rem The previous version used a fragile in-place PowerShell regex insertion
+rem that often produced malformed XML on user systems. The shipped
+rem Kenshi_MainMenu.layout is a vanilla layout with the MULTIPLAYER button
+rem already in place -- overwriting is reliable across Kenshi versions and
+rem locales because the layout file has not changed since FCS 1.0.
+rem The original is preserved in KenshiMP_backup\.
 echo  [4/7] Installing main menu layout...
 
 copy /Y "%~dp0Kenshi_MainMenu.layout" "%KENSHI_DIR%\data\gui\layout\Kenshi_MainMenu.layout" >nul
@@ -250,3 +250,4 @@ echo   Backups saved to: %BACKUP_DIR%
 echo   To uninstall, run uninstall.bat
 echo.
 pause
+exit /b 0

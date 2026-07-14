@@ -155,3 +155,4 @@ echo   Your game is back to vanilla.
 echo  ============================================
 echo.
 pause
+exit /b 0
