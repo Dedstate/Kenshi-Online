@@ -15,6 +15,7 @@ lib/Debug/
 *.tmp
 *.bak
 *~
+validation-artifacts/
 
 # OS files
 .DS_Store

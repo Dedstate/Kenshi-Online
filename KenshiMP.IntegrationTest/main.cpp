@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <chrono>
 #include <thread>
@@ -474,10 +475,79 @@ struct TestClient {
 
 #ifdef _WIN32
 static PROCESS_INFORMATION g_serverProcess{};
+static std::string g_serverStdoutPath;
+static std::string g_serverStderrPath;
+
+static void PrintServerLogTail(const char* label, const std::string& path) {
+    if (path.empty()) {
+        return;
+    }
+
+    std::ifstream input(path);
+    if (!input) {
+        printf("[Server] %s log unavailable: %s\n", label, path.c_str());
+        return;
+    }
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(input, line)) {
+        lines.push_back(line);
+    }
+    const size_t first = lines.size() > 20 ? lines.size() - 20 : 0;
+    printf("[Server] Last %s lines from %s:\n", label, path.c_str());
+    for (size_t index = first; index < lines.size(); ++index) {
+        printf("  %s\n", lines[index].c_str());
+    }
+}
+
+static bool GetServerExitCode(DWORD* exitCode) {
+    if (!g_serverProcess.hProcess || WaitForSingleObject(g_serverProcess.hProcess, 0) != WAIT_OBJECT_0) {
+        return false;
+    }
+    return GetExitCodeProcess(g_serverProcess.hProcess, exitCode) != FALSE;
+}
+
+static int GetReadinessTimeoutMilliseconds() {
+    char value[32]{};
+    DWORD length = GetEnvironmentVariableA("KMP_READY_TIMEOUT_SECONDS", value, sizeof(value));
+    if (length == 0 || length >= sizeof(value)) {
+        return 60000;
+    }
+    const long seconds = strtol(value, nullptr, 10);
+    return seconds > 0 && seconds <= 600 ? static_cast<int>(seconds * 1000) : 60000;
+}
 
 static bool StartServer(const char* exePath) {
     STARTUPINFOA si{};
     si.cb = sizeof(si);
+
+    char stdoutPath[MAX_PATH]{};
+    char stderrPath[MAX_PATH]{};
+    const DWORD stdoutLength = GetEnvironmentVariableA("KMP_SERVER_STDOUT_LOG", stdoutPath, sizeof(stdoutPath));
+    const DWORD stderrLength = GetEnvironmentVariableA("KMP_SERVER_STDERR_LOG", stderrPath, sizeof(stderrPath));
+    HANDLE stdoutHandle = INVALID_HANDLE_VALUE;
+    HANDLE stderrHandle = INVALID_HANDLE_VALUE;
+    if (stdoutLength > 0 && stdoutLength < sizeof(stdoutPath) && stderrLength > 0 && stderrLength < sizeof(stderrPath)) {
+        SECURITY_ATTRIBUTES attributes{};
+        attributes.nLength = sizeof(attributes);
+        attributes.bInheritHandle = TRUE;
+        stdoutHandle = CreateFileA(stdoutPath, GENERIC_WRITE, FILE_SHARE_READ, &attributes, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        stderrHandle = CreateFileA(stderrPath, GENERIC_WRITE, FILE_SHARE_READ, &attributes, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (stdoutHandle == INVALID_HANDLE_VALUE || stderrHandle == INVALID_HANDLE_VALUE) {
+            printf("ERROR: Failed to open server stdout/stderr logs (error %lu)\n", GetLastError());
+            if (stdoutHandle != INVALID_HANDLE_VALUE) CloseHandle(stdoutHandle);
+            if (stderrHandle != INVALID_HANDLE_VALUE) CloseHandle(stderrHandle);
+            return false;
+        }
+        g_serverStdoutPath = stdoutPath;
+        g_serverStderrPath = stderrPath;
+        si.dwFlags |= STARTF_USESTDHANDLES;
+        si.hStdOutput = stdoutHandle;
+        si.hStdError = stderrHandle;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        printf("[Server] stdout: %s\n[Server] stderr: %s\n", stdoutPath, stderrPath);
+    }
 
     // Build command line
     char cmdLine[512];
@@ -494,13 +564,17 @@ static bool StartServer(const char* exePath) {
 
     printf("[Server] Working directory: %s\n", workDirPtr ? workDirPtr : "(current)");
 
-    if (!CreateProcessA(nullptr, cmdLine, nullptr, nullptr, FALSE,
-                        CREATE_NEW_CONSOLE, nullptr, workDirPtr,
+    if (!CreateProcessA(nullptr, cmdLine, nullptr, nullptr, TRUE,
+                        CREATE_NO_WINDOW, nullptr, workDirPtr,
                         &si, &g_serverProcess)) {
         printf("ERROR: Failed to start server (error %lu)\n", GetLastError());
         printf("  Tried: %s\n", exePath);
+        if (stdoutHandle != INVALID_HANDLE_VALUE) CloseHandle(stdoutHandle);
+        if (stderrHandle != INVALID_HANDLE_VALUE) CloseHandle(stderrHandle);
         return false;
     }
+    if (stdoutHandle != INVALID_HANDLE_VALUE) CloseHandle(stdoutHandle);
+    if (stderrHandle != INVALID_HANDLE_VALUE) CloseHandle(stderrHandle);
     printf("[Server] Started (PID %lu)\n", g_serverProcess.dwProcessId);
     return true;
 }
@@ -1479,34 +1553,51 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    // Server blocks on UPnP discovery (up to 3 retries × 1s each) + world load
-    // before entering its main loop. Total startup can be 5-10+ seconds.
-    printf("[*] Waiting for server to start (UPnP discovery may take a few seconds)...\n");
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-
-    // Warm-up: keep trying to connect until server is ready
+    // Poll until the server accepts and handshakes a client. The workflow sets
+    // KMP_READY_TIMEOUT_SECONDS; manual runs retain the 60-second default.
     {
-        printf("[*] Probing server...\n");
+        const int readinessTimeoutMs = GetReadinessTimeoutMilliseconds();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(readinessTimeoutMs);
+        printf("[*] Probing server at 127.0.0.1:%d for up to %d seconds...\n", KMP_DEFAULT_PORT, readinessTimeoutMs / 1000);
         bool ready = false;
-        for (int attempt = 0; attempt < 5 && !ready; attempt++) {
+        int attempt = 0;
+        while (!ready && std::chrono::steady_clock::now() < deadline) {
+            DWORD serverExitCode = 0;
+            if (GetServerExitCode(&serverExitCode)) {
+                printf("ERROR: Server exited during readiness wait (exit code %lu). stdout=%s stderr=%s\n",
+                       serverExitCode, g_serverStdoutPath.c_str(), g_serverStderrPath.c_str());
+                PrintServerLogTail("stdout", g_serverStdoutPath);
+                PrintServerLogTail("stderr", g_serverStderrPath);
+                StopServer();
+                enet_deinitialize();
+                return 1;
+            }
+
+            ++attempt;
             TestClient probe;
             probe.Init("Probe");
             probe.Connect("127.0.0.1", KMP_DEFAULT_PORT);
-            ready = probe.PollUntil([&]() { return probe.connected; }, 3000);
+            ready = probe.PollUntil([&]() { return probe.connected; }, 1000);
             if (ready) {
                 probe.SendHandshake();
-                probe.PollUntil([&]() { return probe.handshakeOk; }, 3000);
+                probe.PollUntil([&]() { return probe.handshakeOk; }, 1000);
                 ready = probe.handshakeOk;
             }
             probe.Disconnect();
             probe.Destroy();
             if (!ready) {
-                printf("[*] Attempt %d: not ready yet, retrying...\n", attempt + 1);
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                printf("[*] Attempt %d: not ready yet, retrying...\n", attempt);
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
             }
         }
         if (!ready) {
-            printf("ERROR: Server did not accept connections after ~17s\n");
+            DWORD serverExitCode = 0;
+            const bool exited = GetServerExitCode(&serverExitCode);
+            printf("ERROR: Server readiness timeout: host=127.0.0.1 port=%d status=%s%s stdout=%s stderr=%s\n",
+                   KMP_DEFAULT_PORT, exited ? "exited" : "running", exited ? (" exit-code=" + std::to_string(serverExitCode)).c_str() : "",
+                   g_serverStdoutPath.c_str(), g_serverStderrPath.c_str());
+            PrintServerLogTail("stdout", g_serverStdoutPath);
+            PrintServerLogTail("stderr", g_serverStderrPath);
             StopServer();
             enet_deinitialize();
             return 1;
@@ -1581,8 +1672,10 @@ int main(int argc, char** argv) {
         printf("\nAll tests PASSED!\n");
     }
 
-    printf("\nPress Enter to exit...\n");
-    getchar();
+    if (GetEnvironmentVariableA("KMP_NONINTERACTIVE", nullptr, 0) == 0) {
+        printf("\nPress Enter to exit...\n");
+        getchar();
+    }
 
     return g_testsFailed > 0 ? 1 : 0;
 }
