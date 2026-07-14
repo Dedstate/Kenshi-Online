@@ -55,8 +55,10 @@ if not errorlevel 1 (
 
 set "STATE_DIR=%KENSHI_DIR%\.KenshiMP-install-state"
 if not exist "%STATE_DIR%" (
-    echo  [OK] No managed KenshiMP installation was found.
-    echo       Nothing was removed. This is safe on repeated runs.
+    echo  [INFO] No managed installer state was found.
+    echo         Checking for a legacy KenshiMP installation...
+    call :legacy_uninstall
+    if errorlevel 1 goto :legacy_failed
     set "EXIT_CODE=0"
     goto :finish
 )
@@ -154,6 +156,97 @@ echo          "%STATE_DIR%"
 echo          Resolve the reported filesystem problem, then run uninstall again.
 set "EXIT_CODE=4"
 goto :finish
+
+:legacy_failed
+echo  [ERROR] Legacy uninstall could not safely complete every operation.
+echo          Existing files were preserved wherever ownership was uncertain.
+set "EXIT_CODE=4"
+goto :finish
+
+:legacy_uninstall
+call :probe_directory "%KENSHI_DIR%"
+if errorlevel 1 exit /b 1
+call :probe_directory "%KENSHI_DIR%\data"
+if errorlevel 1 exit /b 1
+call :probe_directory "%KENSHI_DIR%\data\gui\layout"
+if errorlevel 1 exit /b 1
+call :probe_file "%KENSHI_DIR%\Plugins_x64.cfg"
+if errorlevel 1 exit /b 1
+call :probe_file "%KENSHI_DIR%\data\__mods.list"
+if errorlevel 1 exit /b 1
+
+rem Woki hardening: always remove exact legacy registration lines before
+rem deleting binaries, so Ogre cannot reference a missing plugin.
+set "KMP_CONFIG_FILE=%KENSHI_DIR%\Plugins_x64.cfg"
+set "KMP_CONFIG_ENTRY=Plugin=KenshiMP.Core"
+call :remove_config_entry
+if errorlevel 1 exit /b 1
+set "KMP_CONFIG_FILE=%KENSHI_DIR%\data\__mods.list"
+set "KMP_CONFIG_ENTRY=kenshi-online"
+call :remove_config_entry
+if errorlevel 1 exit /b 1
+
+call :delete_if_exists "%KENSHI_DIR%\KenshiMP.Core.dll"
+if errorlevel 1 exit /b 1
+call :delete_if_exists "%KENSHI_DIR%\KenshiMP.Server.exe"
+if errorlevel 1 exit /b 1
+call :delete_if_exists "%KENSHI_DIR%\data\gui\layout\Kenshi_MultiplayerPanel.layout"
+if errorlevel 1 exit /b 1
+call :delete_if_exists "%KENSHI_DIR%\data\gui\layout\Kenshi_MultiplayerHUD.layout"
+if errorlevel 1 exit /b 1
+call :delete_if_exists "%KENSHI_DIR%\data\kenshi-online.mod"
+if errorlevel 1 exit /b 1
+call :delete_if_exists "%KENSHI_DIR%\mods\kenshi-online\kenshi-online.mod"
+if errorlevel 1 exit /b 1
+
+set "LEGACY_BACKUP_DIR=%KENSHI_DIR%\KenshiMP_backup"
+if exist "%LEGACY_BACKUP_DIR%\Plugins_x64.cfg.bak" (
+    copy /B /Y "%LEGACY_BACKUP_DIR%\Plugins_x64.cfg.bak" "%KENSHI_DIR%\Plugins_x64.cfg" >NUL 2>&1
+    if errorlevel 1 exit /b 1
+    del /F /Q "%LEGACY_BACKUP_DIR%\Plugins_x64.cfg.bak" >NUL 2>&1
+)
+if exist "%LEGACY_BACKUP_DIR%\Kenshi_MainMenu.layout.bak" (
+    copy /B /Y "%LEGACY_BACKUP_DIR%\Kenshi_MainMenu.layout.bak" "%KENSHI_DIR%\data\gui\layout\Kenshi_MainMenu.layout" >NUL 2>&1
+    if errorlevel 1 exit /b 1
+    del /F /Q "%LEGACY_BACKUP_DIR%\Kenshi_MainMenu.layout.bak" >NUL 2>&1
+) else (
+    call :strip_legacy_menu_button
+    if errorlevel 1 exit /b 1
+)
+if exist "%LEGACY_BACKUP_DIR%\__mods.list.bak" (
+    copy /B /Y "%LEGACY_BACKUP_DIR%\__mods.list.bak" "%KENSHI_DIR%\data\__mods.list" >NUL 2>&1
+    if errorlevel 1 exit /b 1
+    del /F /Q "%LEGACY_BACKUP_DIR%\__mods.list.bak" >NUL 2>&1
+)
+
+if exist "%KENSHI_DIR%\mods\kenshi-online" (
+    rmdir "%KENSHI_DIR%\mods\kenshi-online" >NUL 2>&1
+    if exist "%KENSHI_DIR%\mods\kenshi-online" echo  [INFO] Preserved non-package files in mods\kenshi-online.
+)
+if exist "%LEGACY_BACKUP_DIR%" (
+    rmdir "%LEGACY_BACKUP_DIR%" >NUL 2>&1
+    if exist "%LEGACY_BACKUP_DIR%" echo  [INFO] Preserved unrecognized files in KenshiMP_backup.
+)
+
+echo  [OK] Legacy KenshiMP files and registration entries were removed.
+exit /b 0
+
+:remove_config_entry
+if not exist "%KMP_CONFIG_FILE%" exit /b 0
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = $env:KMP_CONFIG_FILE; $entry = $env:KMP_CONFIG_ENTRY; $lines = @(Get-Content -LiteralPath $p) | Where-Object { $_ -ne $entry }; $text = if ($lines.Count -gt 0) { ($lines -join \"`r`n\") + \"`r`n\" } else { '' }; [IO.File]::WriteAllText($p, $text, [Text.Encoding]::ASCII)" >NUL 2>&1
+exit /b %ERRORLEVEL%
+
+:delete_if_exists
+if not exist "%~1" exit /b 0
+del /F /Q "%~1" >NUL 2>&1
+if exist "%~1" exit /b 1
+exit /b 0
+
+:strip_legacy_menu_button
+if not exist "%KENSHI_DIR%\data\gui\layout\Kenshi_MainMenu.layout" exit /b 0
+set "KMP_LEGACY_LAYOUT=%KENSHI_DIR%\data\gui\layout\Kenshi_MainMenu.layout"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = $env:KMP_LEGACY_LAYOUT; $c = Get-Content -LiteralPath $p -Raw; $c = [Text.RegularExpressions.Regex]::Replace($c, '(?s)\s*<Widget[^>]*name=\"MultiplayerButton\"[^>]*>.*?</Widget>', ''); [IO.File]::WriteAllText($p, $c, [Text.UTF8Encoding]::new($false))" >NUL 2>&1
+exit /b %ERRORLEVEL%
 
 :probe_directory
 set "PROBE_FILE=%~1\.kenshimp-write-test-%RANDOM%-%RANDOM%.tmp"

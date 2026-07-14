@@ -191,15 +191,14 @@ call :copy_required "%~dp0kenshi-online.mod" "%KENSHI_DIR%\mods\kenshi-online\ke
 if errorlevel 1 goto :install_failed
 
 echo  [5/6] Updating Kenshi configuration...
-findstr /X /C:"Plugin=KenshiMP.Core" "%KENSHI_DIR%\Plugins_x64.cfg" >NUL 2>&1
-if errorlevel 1 (
-    >>"%KENSHI_DIR%\Plugins_x64.cfg" echo Plugin=KenshiMP.Core
-)
-if not exist "%KENSHI_DIR%\data\__mods.list" type NUL >"%KENSHI_DIR%\data\__mods.list"
-findstr /X /C:"kenshi-online" "%KENSHI_DIR%\data\__mods.list" >NUL 2>&1
-if errorlevel 1 (
-    >>"%KENSHI_DIR%\data\__mods.list" echo kenshi-online
-)
+set "KMP_CONFIG_FILE=%KENSHI_DIR%\Plugins_x64.cfg"
+set "KMP_CONFIG_ENTRY=Plugin=KenshiMP.Core"
+call :ensure_config_entry
+if errorlevel 1 goto :install_failed
+set "KMP_CONFIG_FILE=%KENSHI_DIR%\data\__mods.list"
+set "KMP_CONFIG_ENTRY=kenshi-online"
+call :ensure_config_entry
+if errorlevel 1 goto :install_failed
 
 echo  [6/6] Verifying installation...
 for %%F in (
@@ -278,6 +277,14 @@ for %%F in ("%~1") do if %%~zF LSS %~3 (
     exit /b 1
 )
 exit /b 0
+
+:ensure_config_entry
+rem Rewrite through PowerShell so repeated installs leave one exact entry and
+rem files without a trailing newline cannot concatenate the new entry.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = $env:KMP_CONFIG_FILE; $entry = $env:KMP_CONFIG_ENTRY; $lines = @(); if (Test-Path -LiteralPath $p) { $lines = @(Get-Content -LiteralPath $p) }; $lines = @($lines | Where-Object { $_ -ne $entry -and $_ -ne '' }); $lines += $entry; Set-Content -LiteralPath $p -Value $lines -Encoding ASCII" >NUL 2>&1
+if errorlevel 1 exit /b 1
+findstr /X /C:"%KMP_CONFIG_ENTRY%" "%KMP_CONFIG_FILE%" >NUL 2>&1
+exit /b %ERRORLEVEL%
 
 :probe_directory
 set "PROBE_FILE=%~1\.kenshimp-write-test-%RANDOM%-%RANDOM%.tmp"
