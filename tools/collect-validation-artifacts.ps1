@@ -128,7 +128,8 @@ if ($shouldRunTests) {
             }
         }
         $lines = @(Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue)
-        $summary = $lines | Where-Object { $_ -match "Results:\s*\d+\s+passed,\s*\d+\s+failed" } | Select-Object -Last 1
+        $summaryMatch = Select-String -LiteralPath $logPath -Pattern "Results:\s*\d+\s+passed,\s*\d+\s+failed" | Select-Object -Last 1
+        $summary = if ($summaryMatch) { $summaryMatch.Line.Trim() } else { $null }
         $passed = $null
         $failed = $null
         if ($summary -and $summary -match "Results:\s*(\d+)\s+passed,\s*(\d+)\s+failed") {
@@ -139,7 +140,7 @@ if ($shouldRunTests) {
             $failed = 0
             $summary = "All tests PASSED!"
         }
-        $failLines = @($lines | Where-Object { $_ -match "\[FAIL\]" })
+        $failLines = @(Select-String -LiteralPath $logPath -Pattern "\[FAIL\]" | ForEach-Object { $_.Line.Trim() })
         $testResults += [pscustomobject]@{
             Name = $testName; ExitCode = $exitCode; Passed = $passed; Failed = $failed
             Summary = $summary; Failures = $failLines; Log = ("logs/{0}" -f [System.IO.Path]::GetFileName($logPath))
