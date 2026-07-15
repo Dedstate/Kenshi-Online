@@ -29,6 +29,7 @@ void Overlay::Update() {
         snprintf(m_serverPort, sizeof(m_serverPort), "%d", config.lastPort);
         m_settingsAutoConnect = false; // Auto-connect disabled — use /connect manually
         m_autoConnectPending = false;
+        m_hostAutoConnectPending = false;
         OutputDebugStringA("KMP: Overlay::Update() — first frame config loaded\n");
     }
 
@@ -71,6 +72,7 @@ void Overlay::Update() {
         if (elapsed.count() >= 2) {
             m_autoConnectDone = true;
             m_autoConnectPending = false;
+            m_hostAutoConnectPending = false;
             auto& core = Core::Get();
             uint16_t port = static_cast<uint16_t>(std::atoi(m_serverPort));
 
@@ -272,6 +274,7 @@ void Overlay::Shutdown() {
 void Overlay::ResetForReconnect() {
     // Reset connection state for clean reconnect
     m_autoConnectDone = false;
+    m_hostAutoConnectPending = false;
     m_gameLoadedTimerStarted = false;
     m_connectAttempt = 0;
     m_retryPending = false;
@@ -295,13 +298,21 @@ void Overlay::SetAutoConnect(const std::string& ip, uint16_t port) {
     snprintf(m_serverPort, sizeof(m_serverPort), "%d", port);
     m_autoConnectPending = true;
     m_autoConnectDone = false;
+    m_hostAutoConnectPending = false;
     m_gameLoadedTimerStarted = false;
+}
+
+void Overlay::SetHostAutoConnect(const std::string& ip, uint16_t port) {
+    SetAutoConnect(ip, port);
+    m_hostAutoConnectPending = true;
 }
 
 void Overlay::SetConnectionInfo(const std::string& ip, uint16_t port, const std::string& name) {
     strncpy(m_serverAddress, ip.c_str(), sizeof(m_serverAddress) - 1);
     snprintf(m_serverPort, sizeof(m_serverPort), "%d", port);
     strncpy(m_playerName, name.c_str(), sizeof(m_playerName) - 1);
+    m_autoConnectPending = false;
+    m_hostAutoConnectPending = false;
     // Reset retry state for fresh connection attempt
     m_connectAttempt = 0;
     m_retryPending = false;

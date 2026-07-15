@@ -41,8 +41,11 @@ public:
 
     // Helpers for NativeMenu to drive overlay connection state
     void SetHostingServer(bool hosting) { m_hostingServer = hosting; }
+    bool IsHostingServer() const { return m_hostingServer; }
     void SetConnecting(bool connecting) { m_connecting = connecting; }
     void SetAutoConnect(const std::string& ip, uint16_t port);
+    void SetHostAutoConnect(const std::string& ip, uint16_t port);
+    bool IsHostAutoConnectPending() const { return m_hostAutoConnectPending; }
     void SetConnectionInfo(const std::string& ip, uint16_t port, const std::string& name);
     void SetPlayerName(const std::string& name);
 
@@ -78,6 +81,7 @@ private:
     // Auto-connect on game load
     bool m_autoConnectPending = false;  // True = connect when game loads
     bool m_autoConnectDone = false;     // True = already attempted
+    bool m_hostAutoConnectPending = false; // Host-local queue not yet consumed
 
     // Hosting
     bool m_hostingServer = false;       // True if we launched the server process

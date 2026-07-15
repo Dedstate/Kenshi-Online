@@ -48,6 +48,14 @@ static volatile int g_lastTickStep = -1;
 static volatile int g_tickNumber = 0;
 static volatile const char* g_lastStepName = "init";
 
+// Post-gap readiness is tracked separately from CharacterCreate events because
+// the first Present after a blocking save load can arrive after the create burst.
+static bool g_loadingGapObserved = false;
+static std::chrono::steady_clock::time_point g_lastLoadingGapTime{};
+static int g_postGapValidatedPolls = 0;
+static const char* g_onGameLoadedSource = "unspecified";
+static constexpr int POST_GAP_STABLE_MS = 8000;
+
 // Vectored exception handler — fires BEFORE Kenshi's frame-based SEH handlers.
 // SetUnhandledExceptionFilter was being overridden by Kenshi, so we never saw crash info.
 static PVOID g_vehHandle = nullptr;
@@ -1263,10 +1271,23 @@ void Core::TransitionTo(ClientPhase newPhase) {
 void Core::OnLoadingGapDetected() {
     ClientPhase current = m_clientPhase.load(std::memory_order_acquire);
 
+    // A new gap while Loading means rendering is not yet stable. Keep the
+    // existing loading state and restart only the post-gap readiness window.
+    if (current == ClientPhase::Loading) {
+        g_loadingGapObserved = true;
+        g_lastLoadingGapTime = std::chrono::steady_clock::now();
+        g_postGapValidatedPolls = 0;
+        return;
+    }
+
     // Accept from MainMenu (normal flow) or GameReady (in-game Load button,
     // detected by render_hooks as >10s gap). NOT from Startup — engine initialization
     // gaps are not save game loads.
     if (current == ClientPhase::MainMenu || current == ClientPhase::GameReady) {
+        g_loadingGapObserved = true;
+        g_lastLoadingGapTime = std::chrono::steady_clock::now();
+        g_postGapValidatedPolls = 0;
+
         // Reset game-loaded state so OnGameLoaded() can fire again for the new save.
         // Without this, a second load would never trigger OnGameLoaded because
         // m_gameLoaded is already true from the first load.
@@ -1393,6 +1414,7 @@ void Core::PollForGameLoad() {
         // Disable loading passthrough before OnGameLoaded enables full hook
         entity_hooks::SetLoadingPassthrough(false);
 
+        g_onGameLoadedSource = "character-create-burst";
         OnGameLoaded();
     } else if (loadingCreates > 0) {
         // Creates are happening — loading is in progress
@@ -1401,6 +1423,32 @@ void Core::PollForGameLoad() {
                          loadingCreates, timeSinceCreate, s_pollCount);
         }
     } else {
+        // The blocking load gap is observed only when Present resumes, which can
+        // be after the CharacterCreate burst. Accept readiness only after the
+        // post-gap render window is stable and both independent globals validate
+        // across more than one poll.
+        auto now = std::chrono::steady_clock::now();
+        bool postGapStable = g_loadingGapObserved && phase == ClientPhase::Loading &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastLoadingGapTime).count() >= POST_GAP_STABLE_MS;
+        if (postGapStable && playerBaseValid && gameWorldValid) {
+            g_postGapValidatedPolls++;
+            if (g_postGapValidatedPolls == 1) {
+                spdlog::info("Core::PollForGameLoad — post-gap readiness candidate after {}ms of stable frames",
+                             POST_GAP_STABLE_MS);
+            }
+            spdlog::info("Core::PollForGameLoad — validated globals PlayerBase=true GameWorld=true "
+                         "(post-gap poll {}/2)", g_postGapValidatedPolls);
+            if (g_postGapValidatedPolls >= 2) {
+                spdlog::info("Core::PollForGameLoad — post-gap readiness accepted after two validated polls");
+                entity_hooks::SetLoadingPassthrough(false);
+                g_onGameLoadedSource = "post-gap-stable-globals";
+                OnGameLoaded();
+                return;
+            }
+        } else {
+            g_postGapValidatedPolls = 0;
+        }
+
         // No creates yet — waiting for loading to start
         s_noCharCount++;
         if (s_noCharCount <= 5 || s_noCharCount % 10 == 0) {
@@ -1420,12 +1468,14 @@ void Core::PollForGameLoad() {
                 m_nativeHud.LogStep("GAME", "Game loaded (CharacterIterator fallback, " +
                                     std::to_string(charCount) + " chars)");
                 entity_hooks::SetLoadingPassthrough(false);
+                g_onGameLoadedSource = "character-iterator-fallback";
                 OnGameLoaded();
             } else if (s_noCharCount >= 60) {
                 spdlog::warn("Core::PollForGameLoad — ultimate fallback: 120s with valid globals, "
                              "no creates, no chars. Assuming loaded.");
                 m_nativeHud.LogStep("GAME", "Game assumed loaded (ultimate fallback after 120s)");
                 entity_hooks::SetLoadingPassthrough(false);
+                g_onGameLoadedSource = "globals-no-characters-fallback";
                 OnGameLoaded();
             }
         }
@@ -1439,6 +1489,7 @@ void Core::PollForGameLoad() {
             m_nativeHud.AddSystemMessage("WARNING: Force-loaded after 90s timeout!");
             m_nativeHud.LogStep("WARN", "Hard timeout (90s) - forced GameLoaded");
             entity_hooks::SetLoadingPassthrough(false);
+            g_onGameLoadedSource = "hard-timeout";
             OnGameLoaded();
         }
     }
@@ -1450,6 +1501,8 @@ static bool SEH_AllyModFaction(void* character);
 
 void Core::OnGameLoaded() {
     if (m_gameLoaded.exchange(true)) return; // Only run once
+
+    spdlog::info("Core::OnGameLoaded — source={}", g_onGameLoadedSource);
 
     // Transition to GameReady phase
     TransitionTo(ClientPhase::GameReady);
@@ -1676,16 +1729,20 @@ void Core::OnGameLoaded() {
     // CRITICAL: Connect AFTER game loads, not in main menu!
     // This ensures world is ready before any network sync happens
     if (!m_connected.load() && m_config.autoConnect) {
-        spdlog::info("Core::OnGameLoaded — Auto-connecting to {}:{}",
-                     m_config.lastServer, m_config.lastPort);
-        m_nativeHud.AddSystemMessage("Game loaded - connecting to server...");
-
-        // ConnectAsync takes only 2 arguments (address, port)
-        if (m_client.ConnectAsync(m_config.lastServer, m_config.lastPort)) {
-            m_clientPhase.store(ClientPhase::Connecting);
-            m_nativeHud.LogStep("NET", "Connecting to " + m_config.lastServer + ":" + std::to_string(m_config.lastPort));
+        if (m_overlay.IsHostAutoConnectPending()) {
+            spdlog::info("Core::OnGameLoaded — Generic auto-connect skipped; host-local connect is pending");
         } else {
-            m_nativeHud.AddSystemMessage("Connection failed - check server");
+            spdlog::info("Core::OnGameLoaded — Auto-connecting to {}:{}",
+                         m_config.lastServer, m_config.lastPort);
+            m_nativeHud.AddSystemMessage("Game loaded - connecting to server...");
+
+            // ConnectAsync takes only 2 arguments (address, port)
+            if (m_client.ConnectAsync(m_config.lastServer, m_config.lastPort)) {
+                m_clientPhase.store(ClientPhase::Connecting);
+                m_nativeHud.LogStep("NET", "Connecting to " + m_config.lastServer + ":" + std::to_string(m_config.lastPort));
+            } else {
+                m_nativeHud.AddSystemMessage("Connection failed - check server");
+            }
         }
     }
 
