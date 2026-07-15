@@ -41,6 +41,7 @@ public:
 
     // Helpers for NativeMenu to drive overlay connection state
     void SetHostingServer(bool hosting) { m_hostingServer = hosting; }
+    bool IsHostingServer() const { return m_hostingServer; }
     void SetConnecting(bool connecting) { m_connecting = connecting; }
     void SetAutoConnect(const std::string& ip, uint16_t port);
     void SetConnectionInfo(const std::string& ip, uint16_t port, const std::string& name);

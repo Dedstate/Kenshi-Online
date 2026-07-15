@@ -338,6 +338,7 @@ static HRESULT __stdcall HookPresent(IDXGISwapChain* swapChain, UINT syncInterva
                     // Still loading — another gap means assets are still streaming.
                     // Reset smooth-frame timer.
                     s_loadingSmoothStarted = false;
+                    core.OnLoadingGapDetected();
                     spdlog::debug("render_hooks: Loading gap ({} ms) — reset smooth timer", gap.count());
                 } else if (phase == ClientPhase::GameReady && gap.count() > 10000) {
                     // Very long gap (>10s) during GameReady = user loaded a new save
