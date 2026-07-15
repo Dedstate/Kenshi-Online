@@ -477,7 +477,7 @@ void NativeMenu::OnHostClicked() {
 
             auto& overlay = Core::Get().GetOverlay();
             overlay.SetHostingServer(true);
-            overlay.SetAutoConnect("127.0.0.1", KMP_DEFAULT_PORT);
+            overlay.SetHostAutoConnect("127.0.0.1", KMP_DEFAULT_PORT);
 
             spdlog::info("NativeMenu: Launched server: {}", serverExe);
 

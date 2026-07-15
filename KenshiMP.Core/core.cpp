@@ -1729,7 +1729,7 @@ void Core::OnGameLoaded() {
     // CRITICAL: Connect AFTER game loads, not in main menu!
     // This ensures world is ready before any network sync happens
     if (!m_connected.load() && m_config.autoConnect) {
-        if (m_overlay.IsHostingServer()) {
+        if (m_overlay.IsHostAutoConnectPending()) {
             spdlog::info("Core::OnGameLoaded — Generic auto-connect skipped; host-local connect is pending");
         } else {
             spdlog::info("Core::OnGameLoaded — Auto-connecting to {}:{}",
