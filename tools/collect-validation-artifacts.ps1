@@ -40,22 +40,82 @@ function Get-GitOutput {
     return @()
 }
 
+function New-ArtifactRecord {
+    param(
+        [string]$SourcePath,
+        [string]$ArtifactPath,
+        [string]$ArtifactRelativePath,
+        [string]$Category,
+        [string]$Status,
+        [Int64]$SizeBytes = 0,
+        $LastWriteTime = $null,
+        [string]$Sha256 = $null,
+        [string]$Warning = $null
+    )
+
+    return [pscustomobject][ordered]@{
+        SourcePath = $SourcePath; ArtifactPath = $ArtifactPath; ArtifactRelativePath = $ArtifactRelativePath
+        Category = $Category; SizeBytes = $SizeBytes; LastWriteTime = if ($LastWriteTime) { $LastWriteTime.ToString("o") } else { $null }
+        Sha256 = $Sha256; Status = $Status; Warning = $Warning
+    }
+}
+
 function Copy-ArtifactFile {
     param(
         [Parameter(Mandatory = $true)][string]$Source,
-        [Parameter(Mandatory = $true)][string]$DestinationDirectory
+        [Parameter(Mandatory = $true)][string]$DestinationDirectory,
+        [Parameter(Mandatory = $true)][string]$DestinationPrefix,
+        [Parameter(Mandatory = $true)][string]$Category
     )
 
-    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) { return $null }
-
-    $destination = Join-Path $DestinationDirectory ([System.IO.Path]::GetFileName($Source))
-    if (Test-Path -LiteralPath $destination) {
-        $base = [System.IO.Path]::GetFileNameWithoutExtension($Source)
-        $extension = [System.IO.Path]::GetExtension($Source)
-        $destination = Join-Path $DestinationDirectory ("{0}-{1}{2}" -f $base, ([guid]::NewGuid().ToString("N").Substring(0, 8)), $extension)
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+        return New-ArtifactRecord -SourcePath $Source -Category $Category -Status "missing" -Warning "Expected file missing."
     }
-    Copy-Item -LiteralPath $Source -Destination $destination -Force
-    return $destination
+
+    $sourceItem = Get-Item -LiteralPath $Source
+    $fileName = "{0}{1}" -f $DestinationPrefix, $sourceItem.Name
+    $destination = Join-Path $DestinationDirectory $fileName
+    $collision = 2
+    if (Test-Path -LiteralPath $destination) {
+        $base = [System.IO.Path]::GetFileNameWithoutExtension($fileName)
+        $extension = [System.IO.Path]::GetExtension($fileName)
+        do {
+            $destination = Join-Path $DestinationDirectory ("{0}-{1}{2}" -f $base, $collision, $extension)
+            $collision++
+        } while (Test-Path -LiteralPath $destination)
+    }
+
+    try {
+        Copy-Item -LiteralPath $Source -Destination $destination -Force
+        $warnings = @()
+        if ($sourceItem.Length -eq 0) { $warnings += "Copied file is zero bytes." }
+        if ($sourceItem.LastWriteTime -lt $artifactStart.AddHours(-2)) { $warnings += "Copied file is older than the artifact timestamp by more than 2 hours." }
+        if (((Get-Date) - $sourceItem.LastWriteTime).TotalSeconds -lt 5) { $warnings += "Copied file was modified within the last 5 seconds; logs may still be writing or unflushed." }
+        $sha256 = $null
+        try { $sha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() } catch { $warnings += "SHA256 unavailable: $($_.Exception.Message)" }
+        $relative = (Join-Path ([System.IO.Path]::GetFileName($DestinationDirectory)) ([System.IO.Path]::GetFileName($destination))) -replace '\\', '/'
+        return New-ArtifactRecord -SourcePath $sourceItem.FullName -ArtifactPath $destination -ArtifactRelativePath $relative -Category $Category -SizeBytes $sourceItem.Length -LastWriteTime $sourceItem.LastWriteTime -Sha256 $sha256 -Status "copied" -Warning ($warnings -join " ")
+    } catch {
+        return New-ArtifactRecord -SourcePath $Source -Category $Category -Status "failed" -Warning "Copy failed: $($_.Exception.Message)"
+    }
+}
+
+function Copy-ArtifactPattern {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceDirectory,
+        [Parameter(Mandatory = $true)][string]$Pattern,
+        [Parameter(Mandatory = $true)][string]$DestinationDirectory,
+        [Parameter(Mandatory = $true)][string]$DestinationPrefix,
+        [Parameter(Mandatory = $true)][string]$Category,
+        [string]$NameRegex = $null
+    )
+
+    $matches = @(Get-ChildItem -LiteralPath $SourceDirectory -Filter $Pattern -File -ErrorAction SilentlyContinue)
+    if ($NameRegex) { $matches = @($matches | Where-Object { $_.Name -match $NameRegex }) }
+    if ($matches.Count -eq 0) {
+        return @(New-ArtifactRecord -SourcePath (Join-Path $SourceDirectory $Pattern) -Category $Category -Status "missing" -Warning "Expected file missing.")
+    }
+    return @($matches | ForEach-Object { Copy-ArtifactFile -Source $_.FullName -DestinationDirectory $DestinationDirectory -DestinationPrefix $DestinationPrefix -Category $Category })
 }
 
 $repoRoot = Resolve-FullPath (Join-Path $PSScriptRoot "..")
@@ -71,8 +131,18 @@ $BuildDir = Resolve-FullPath $BuildDir
 if (-not (Test-Path -LiteralPath $BuildDir -PathType Container)) {
     throw "BuildDir does not exist: $BuildDir"
 }
-if (-not [string]::IsNullOrWhiteSpace($KenshiPath)) { $KenshiPath = Resolve-FullPath $KenshiPath }
+if (-not [string]::IsNullOrWhiteSpace($KenshiPath)) {
+    $KenshiPath = Resolve-FullPath $KenshiPath
+    $placeholderPatterns = @("\Path\To\", "\Your\Downgraded\Kenshi", "\Actual\Kenshi")
+    if ($placeholderPatterns | Where-Object { $KenshiPath.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 }) {
+        throw "KenshiPath appears to be a placeholder path: $KenshiPath"
+    }
+    if (-not (Test-Path -LiteralPath $KenshiPath -PathType Container)) {
+        throw "KenshiPath does not exist or is not a directory: $KenshiPath"
+    }
+}
 
+$artifactStart = Get-Date
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 if ([string]::IsNullOrWhiteSpace($OutDir)) {
     $OutDir = Join-Path $repoRoot "validation-artifacts"
@@ -152,27 +222,33 @@ if ($shouldRunTests) {
     Write-Host "Tests skipped by -SkipTests."
 }
 
-$copiedFiles = @()
-foreach ($name in @("KenshiOnline_Server.log", "server.json")) {
-    $copied = Copy-ArtifactFile -Source (Join-Path $BuildDir $name) -DestinationDirectory $(if ($name -like "*.log") { $logsDir } else { $configsDir })
-    if ($copied) { $copiedFiles += $copied }
+$artifactRecords = @()
+foreach ($name in @("KenshiOnline_Server.log", "KenshiOnline_CRASH.log", "KenshiOnline_BREADCRUMB.txt")) {
+    $artifactRecords += Copy-ArtifactFile -Source (Join-Path $BuildDir $name) -DestinationDirectory $logsDir -DestinationPrefix "build-" -Category "log"
+}
+$artifactRecords += Copy-ArtifactPattern -SourceDirectory $BuildDir -Pattern "KenshiOnline_*.log" -NameRegex '^KenshiOnline_(?!Server\.log$|CRASH\.log$).+\.log$' -DestinationDirectory $logsDir -DestinationPrefix "build-" -Category "log"
+foreach ($name in @("server.json", "Plugins_x64.cfg", "data\Plugins_x64.cfg")) {
+    $artifactRecords += Copy-ArtifactFile -Source (Join-Path $BuildDir $name) -DestinationDirectory $configsDir -DestinationPrefix "build-" -Category "config"
 }
 foreach ($pattern in @("*unit*console*.log", "*integration*console*.log")) {
     Get-ChildItem -LiteralPath $BuildDir -Filter $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
-        $copied = Copy-ArtifactFile -Source $_.FullName -DestinationDirectory $logsDir
-        if ($copied) { $copiedFiles += $copied }
+        $artifactRecords += Copy-ArtifactFile -Source $_.FullName -DestinationDirectory $logsDir -DestinationPrefix "build-" -Category "test-log"
     }
 }
 if ($KenshiPath) {
-    foreach ($relativePath in @("KenshiOnline.log", "KenshiOnline_Server.log", "server.json", "Plugins_x64.cfg", "data\Plugins_x64.cfg")) {
-        $copied = Copy-ArtifactFile -Source (Join-Path $KenshiPath $relativePath) -DestinationDirectory $(if ($relativePath -like "*.log") { $logsDir } else { $configsDir })
-        if ($copied) { $copiedFiles += $copied }
+    foreach ($name in @("KenshiOnline_Server.log", "KenshiOnline_CRASH.log", "KenshiOnline_BREADCRUMB.txt")) {
+        $artifactRecords += Copy-ArtifactFile -Source (Join-Path $KenshiPath $name) -DestinationDirectory $logsDir -DestinationPrefix "kenshi-" -Category "log"
+    }
+    $artifactRecords += Copy-ArtifactPattern -SourceDirectory $KenshiPath -Pattern "KenshiOnline_*.log" -NameRegex '^KenshiOnline_(?!Server\.log$|CRASH\.log$).+\.log$' -DestinationDirectory $logsDir -DestinationPrefix "kenshi-" -Category "log"
+    foreach ($relativePath in @("server.json", "Plugins_x64.cfg", "data\Plugins_x64.cfg")) {
+        $artifactRecords += Copy-ArtifactFile -Source (Join-Path $KenshiPath $relativePath) -DestinationDirectory $configsDir -DestinationPrefix "kenshi-" -Category "config"
     }
 }
 $appData = [Environment]::GetFolderPath("ApplicationData")
 if ($appData) {
-    $copied = Copy-ArtifactFile -Source (Join-Path $appData "KenshiMP\client.json") -DestinationDirectory $configsDir
-    if ($copied) { $copiedFiles += $copied }
+    $appDataKenshiMp = Join-Path $appData "KenshiMP"
+    $artifactRecords += Copy-ArtifactFile -Source (Join-Path $appDataKenshiMp "client.json") -DestinationDirectory $configsDir -DestinationPrefix "appdata-" -Category "config"
+    $artifactRecords += Copy-ArtifactPattern -SourceDirectory $appDataKenshiMp -Pattern "client_*.json" -DestinationDirectory $configsDir -DestinationPrefix "appdata-" -Category "config"
 }
 
 $binaryMetadata = @()
@@ -195,13 +271,26 @@ $metadata = [ordered]@{
     GitCommit = ((Get-GitOutput @("rev-parse", "HEAD")) -join ""); GitStatusShort = @(Get-GitOutput @("status", "--short"))
     PowerShellVersion = $PSVersionTable.PSVersion.ToString(); WindowsOs = $osInfo; BuildDir = $BuildDir; KenshiPath = $KenshiPath
     Binaries = $binaryMetadata; TestsRun = $shouldRunTests; TestResults = $testResults
+    CollectedFiles = $artifactRecords
+    Warnings = @()
 }
+$metadataWarnings = @($artifactRecords | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Warning) } | ForEach-Object { "$($_.Status): $($_.SourcePath) - $($_.Warning)" })
+$coreRuntimeLogs = @($artifactRecords | Where-Object { $_.Status -eq "copied" -and $_.SourcePath -match "KenshiOnline_\d+\.log$" })
+if ($coreRuntimeLogs.Count -eq 0) { $metadataWarnings += "No Core runtime log found (expected KenshiOnline_<pid>.log)." }
+if ($KenshiPath) {
+    $kenshiLogs = @($artifactRecords | Where-Object { $_.Status -eq "copied" -and $_.SourcePath.StartsWith($KenshiPath, [StringComparison]::OrdinalIgnoreCase) -and $_.Category -eq "log" })
+    if ($kenshiLogs.Count -eq 0) { $metadataWarnings += "No Kenshi-side logs found under KenshiPath." }
+}
+$metadata.Warnings = $metadataWarnings
 $metadataPath = Join-Path $OutDir "metadata.json"
 Write-Utf8File -Path $metadataPath -Content ($metadata | ConvertTo-Json -Depth 6)
 
 $summaryLines = @("# KenshiMP validation artifacts", "", "- Timestamp: $($metadata.Timestamp)", "- Repository: $repoRoot", "- Build directory: $BuildDir")
 if ($KenshiPath) { $summaryLines += "- Kenshi path: $KenshiPath" }
-$summaryLines += "- Git: $($metadata.GitBranch) $($metadata.GitCommit)", "", "## Test results", ""
+$summaryLines += "- Git: $($metadata.GitBranch) $($metadata.GitCommit)", "", "## Warnings", ""
+if ($metadataWarnings.Count -eq 0) { $summaryLines += "No artifact warnings." }
+foreach ($warning in $metadataWarnings) { $summaryLines += "- $warning" }
+$summaryLines += "", "## Test results", ""
 if ($testResults.Count -eq 0) { $summaryLines += "Tests were not run." }
 foreach ($result in $testResults) {
     $summaryLines += "- $($result.Name): exit $($result.ExitCode); $($result.Summary)"
@@ -210,8 +299,13 @@ foreach ($result in $testResults) {
     foreach ($failure in $result.Failures) { $summaryLines += "  - $failure" }
 }
 $summaryLines += "", "## Included files", ""
-if ($copiedFiles.Count -eq 0) { $summaryLines += "No optional logs or configurations were present." }
-foreach ($file in $copiedFiles) { $summaryLines += "- $([System.IO.Path]::GetFileName($file))" }
+$copiedRecords = @($artifactRecords | Where-Object { $_.Status -eq "copied" })
+if ($copiedRecords.Count -eq 0) { $summaryLines += "No allowlisted logs or configurations were present." }
+foreach ($record in $copiedRecords) { $summaryLines += "- $($record.ArtifactRelativePath) <- $($record.SourcePath) ($($record.SizeBytes) bytes; $($record.LastWriteTime))" }
+$summaryLines += "", "## Missing expected runtime files", ""
+$missingRecords = @($artifactRecords | Where-Object { $_.Status -eq "missing" })
+if ($missingRecords.Count -eq 0) { $summaryLines += "None." }
+foreach ($record in $missingRecords) { $summaryLines += "- $($record.SourcePath)" }
 $summaryPath = Join-Path $OutDir "summary.md"
 Write-Utf8File -Path $summaryPath -Content (($summaryLines -join "`n") + "`n")
 
