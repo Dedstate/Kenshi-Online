@@ -20,3 +20,8 @@ validation-artifacts/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local runtime/debug artifacts
+/artifacts/
+
+/validation-artifacts/
